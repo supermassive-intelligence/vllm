@@ -19,6 +19,7 @@ IPC_INPUT_EXT = "_input_socket"
 IPC_OUTPUT_EXT = "_output_socket"
 IPC_HEALTH_EXT = "_health_socket"
 IPC_DATA_EXT = "_data_socket"
+IPC_TOKENS_EXT = "_tokens_socket"
 
 
 class MQEngineDeadError(RuntimeError):
@@ -72,6 +73,7 @@ class RPCStartupRequest(Enum):
 @dataclass
 class RPCStartupResponse:
     tracing_enabled: bool
+    max_kv_cache_size: int
 
 
 class RPCUProfileRequest(Enum):
@@ -115,6 +117,10 @@ class RPCLoadAdapterRequest:
     lora_request: LoRARequest
     # Set the default value of request_id to a new UUID
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+@dataclass
+class FreeTokensRequest:
+    free_token_count: int
 
 
 @dataclass

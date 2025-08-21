@@ -16,6 +16,7 @@ from vllm.engine.llm_engine import LLMEngine
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
+                                         IPC_TOKENS_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
@@ -27,7 +28,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
-                                         RPCUProfileRequest, RPCWakeUpRequest)
+                                         RPCUProfileRequest, RPCWakeUpRequest,
+                                         FreeTokensRequest)
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -93,6 +95,9 @@ class MQLLMEngine:
             self.engine.process_request_outputs_callback = \
                 self._async_socket_engine_callback
 
+            self.engine.send_free_tokens_callback = \
+                self._send_free_tokens_callback
+
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Receive input from the client.
@@ -106,6 +111,10 @@ class MQLLMEngine:
         # Send heartbeats back to client.
         self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
         self.heartbeat_socket.bind(f"{ipc_path}{IPC_HEALTH_EXT}")
+
+        # Send tokens back to client.
+        self.tokens_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.tokens_socket.bind(f"{ipc_path}{IPC_TOKENS_EXT}")
 
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
@@ -209,7 +218,9 @@ class MQLLMEngine:
                 if request == RPCStartupRequest.IS_SERVER_READY:
                     tracing_enabled = self.engine.is_tracing_enabled()
                     response = RPCStartupResponse(
-                        tracing_enabled=tracing_enabled)
+                        tracing_enabled=tracing_enabled,
+                        max_kv_cache_size=self.engine.get_max_kv_cache_size(),
+                    )
 
             except Exception as e:
                 response = e
@@ -411,8 +422,28 @@ class MQLLMEngine:
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
         """Callback used by engine to make socket handling async with GPU."""
+        self._send_free_tokens_for_outputs(request_outputs)
         self._send_outputs(request_outputs)
         self.handle_new_input()
+
+    def _send_free_tokens_for_outputs(self, request_outputs: REQUEST_OUTPUTS_T):
+        """Send free tokens for outputs if available."""
+            free_tokens = 0
+            for output in request_outputs:
+                if not isinstance(output, RequestOutput):
+                    continue
+                free_tokens += len(output.prompt_token_ids)
+                free_tokens += output.max_tokens
+
+            if free_tokens > 0:
+                self._send_free_tokens_callback(free_tokens)
+
+    def _send_free_tokens_callback(self, free_tokens: int):
+        """Callback used by engine to send free tokens to the client."""
+        if not self.tokens_socket.closed:
+            self.tokens_socket.send_multipart(
+                (pickle.dumps(FreeTokensRequest(free_token_count=free_tokens)),), copy=False
+            )
 
     def _set_errored(self, e: BaseException):
         """Log and set errored status if this is the first issue."""
