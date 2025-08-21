@@ -417,6 +417,14 @@ class LLMEngine:
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
 
+        self.max_kv_cache_size = num_gpu_blocks * self.cache_config.block_size
+
+
+    def get_max_kv_cache_size(self) -> int:
+        """Get the maximum size of the KV cache."""
+        return self.max_kv_cache_size
+
+
     @classmethod
     def _get_executor_cls(cls,
                           engine_config: VllmConfig) -> Type[ExecutorBase]:
@@ -559,6 +567,7 @@ class LLMEngine:
             return None
 
         self._validate_model_inputs(processed_inputs, lora_request)
+        self._compute_free_tokens(processed_inputs, params)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -1843,6 +1852,32 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _compute_free_tokens(
+        self, inputs: Union[LLMInputs, EncoderDecoderLLMInputs], params
+    ):
+        if self.model_config.is_multimodal_model:
+            # For encoder-decoder multimodal models, the max_prompt_len
+            # restricts the decoder prompt length
+            prompt_ids = inputs.get("prompt_token_ids")
+        elif self.is_encoder_decoder_model():
+            prompt_ids = inputs.get("encoder_prompt_token_ids")
+        else:
+            prompt_ids = inputs.get("prompt_token_ids")
+
+        input_token_count = len(prompt_ids)
+        max_token_count = self.model_config.max_model_len
+
+        max_output_tokens = 0
+        if isinstance(params, SamplingParams):
+            max_output_tokens = params.max_tokens
+
+        free_tokens = max_token_count - max_output_tokens - input_token_count
+
+        logger.info(f"Free tokens available after tokenization: {free_tokens}")
+
+        if free_tokens > 0:
+            self.send_free_tokens_callback(free_tokens)
 
     def _build_logits_processors(
             self, sampling_params: SamplingParams,

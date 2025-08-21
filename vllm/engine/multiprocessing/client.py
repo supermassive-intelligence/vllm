@@ -23,6 +23,7 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
+                                         IPC_TOKENS_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
                                          RPCIsSleepingRequest,
@@ -120,6 +121,10 @@ class MQLLMEngineClient(EngineClient):
         self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
 
+        # IPC path for acking tokens.
+        self.tokens_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.tokens_socket.connect(f"{ipc_path}{IPC_TOKENS_EXT}")
+
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
@@ -130,6 +135,16 @@ class MQLLMEngineClient(EngineClient):
         # Started after the MQLLMEngine is ready so that we can
         # build the Client in an executor to enable clean shutdown.
         self.output_loop: Optional[asyncio.Task] = None
+
+        # Loop to handle tokens from the LLMEngine periodically.
+        # Started after the MQLLMEngine is ready so that we can
+        # build the Client in an executor to enable clean shutdown.
+        self.token_loop: Optional[asyncio.Task] = None
+
+        self.max_kv_cache_size : Optional[int] = None
+        self.current_kv_cache_size : Optional[int] = None
+
+        self.kv_cache_size_updated_event = asyncio.Event()
 
         # Loop to check health of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready.
@@ -184,6 +199,42 @@ class MQLLMEngineClient(EngineClient):
 
         except Exception as e:
             self._set_errored(e)
+
+    async def run_token_handler_loop(self):
+        """As kv cache token slots become free, they are pushed to the
+        tokens_socket. This loop listens to the tokens_socket and
+        updates the kv cache size.
+        """
+        try:
+            while True:
+                # Poll, checking for ENGINE_DEAD
+                if await self.tokens_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
+                    logger.debug("Waiting for tokens from MQLLMEngine.")
+
+                    # If errored, alert all running requests.
+                    if self.errored:
+                        for queue_j in tuple(self.output_queues.values()):
+                            queue_j.put_nowait(
+                                ENGINE_DEAD_ERROR(self._errored_with))
+                        return
+
+                message: Frame = await self.tokens_socket.recv(copy=False)
+                tokens_response = pickle.loads(message.buffer)
+
+                if isinstance(tokens_response, BaseException):
+                    raise tokens_response
+
+                # Update the kv cache size.
+                self.current_kv_cache_size += tokens_response.freed_tokens
+                self.current_kv_cache_size = min(
+                    self.current_kv_cache_size, self.max_kv_cache_size)
+
+                # Set the event to notify that the kv cache size has
+                # been updated.
+                self.kv_cache_size_updated_event.set()
+
+        except asyncio.CancelledError:
+            logger.debug("Shutting down MQLLMEngineClient token handler loop.")
 
     async def run_output_handler_loop(self):
         """Get RequestOutputs from Engine and stream to Request Queues"""
@@ -288,10 +339,18 @@ class MQLLMEngineClient(EngineClient):
 
             self.tracing_flag = response.tracing_enabled
 
+            self.max_kv_cache_size = response.max_kv_cache_size
+            self.current_kv_cache_size = self.max_kv_cache_size
+
             # Start health_loop.
             if self.health_loop is None:
                 self.health_loop = asyncio.create_task(
                     self.run_heartbeat_loop(timeout=VLLM_RPC_TIMEOUT))
+
+            # Start token handler loop.
+            if self.token_loop is None:
+                self.token_loop = asyncio.create_task(
+                    self.run_token_handler_loop())
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -301,6 +360,8 @@ class MQLLMEngineClient(EngineClient):
         # Cancel background tasks.
         if self.health_loop is not None:
             self.health_loop.cancel()
+        if self.token_loop is not None:
+            self.token_loop.cancel()
         if self.output_loop is not None:
             self.output_loop.cancel()
 
