@@ -205,8 +205,11 @@ class TokenformerModelManager(AdapterModelManager):
         return True
 
     def set_active_adapters(self, lora_requests, lora_mapping):
-        for request in lora_requests:
-            self.activate_adapter(request.adapter_id)
+        if len(lora_requests) == 0:
+            self.deactivate_all_adapters()
+        else:
+            for request in lora_requests:
+                self.activate_adapter(request.adapter_id)
 
     def set_adapter_mapping(self, mapping: Any) -> None:
         pass
