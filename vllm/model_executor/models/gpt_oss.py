@@ -28,6 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
 from .utils import extract_layer_index, maybe_prefix
+from .interfaces import SupportsLoRA, SupportsTokenformer
 
 
 class OAIAttention(nn.Module):
@@ -226,7 +227,19 @@ class GptOssModel(nn.Module):
         return x
 
 
-class GptOssForCausalLM(nn.Module):
+class GptOssForCausalLM(nn.Module, SupportsLoRA, SupportsTokenformer):
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     def __init__(
         self,
