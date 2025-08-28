@@ -41,9 +41,17 @@ class TokenformerMLPAdapter(nn.Module):
         k_gain = 3.0 / math.sqrt(self.hidden_size / self.num_heads)
         v_gain = 3.0 / math.sqrt(self.hidden_size)
 
-        nn.init.normal_(self.tokenformer_k, std=k_gain)
-        nn.init.uniform_(self.tokenformer_v, a=-v_gain, b=v_gain)
-        nn.init.zeros_(self.tokenformer_p)
+        k_init_tensor = torch.empty_like(self.tokenformer_k, dtype=torch.bfloat16)
+        torch.nn.init.normal_(k_init_tensor, std=k_gain)
+        self.tokenformer_k.data.copy_(k_init_tensor)
+
+        v_init_tensor = torch.empty_like(self.tokenformer_v, dtype=torch.bfloat16)
+        torch.nn.init.uniform_(v_init_tensor, a=-v_gain, b=v_gain)
+        self.tokenformer_v.data.copy_(v_init_tensor)
+
+        p_init_tensor = torch.empty_like(self.tokenformer_p, dtype=torch.bfloat16)
+        torch.nn.init.zeros_(p_init_tensor)
+        self.tokenformer_p.data.copy_(p_init_tensor)
 
     # Call layer with all inputs and kwargs
     def forward(self, query: torch.Tensor):
@@ -73,8 +81,8 @@ class TokenformerMLPAdapter(nn.Module):
 
         result = torch.nn.functional.scaled_dot_product_attention(
             query=q,
-            key=k,
-            value=v,
+            key=k.to(q.dtype),
+            value=v.to(q.dtype),
             attn_mask=None,
             dropout_p=0.0,
             is_causal=False,  # should be false for tokenformer
@@ -92,7 +100,7 @@ class TokenformerMLPAdapter(nn.Module):
 
         query_batch = query.view([-1, 1, self.hidden_size])
 
-        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p
+        result = torch.bmm(query_batch, proj_down) @ self.tokenformer_p.to(q.dtype)
 
         return result.view(query.shape)
 
@@ -124,11 +132,22 @@ class TokenformerAttentionAdapter(nn.Module):
     def reset_parameters(self):
         gain = 3.0 / math.sqrt(self.hidden_size)
 
-        nn.init.zeros_(self.tokenformer_k)
-        nn.init.normal_(self.tokenformer_v, std=gain)
+        k_init_tensor = torch.empty_like(self.tokenformer_k, dtype=torch.bfloat16)
+        torch.nn.init.zeros_(k_init_tensor)
+        self.tokenformer_k.data.copy_(k_init_tensor)
 
-        nn.init.normal_(self.tokenformer_k[0:1, :], std=gain)
-        nn.init.zeros_(self.tokenformer_v[0:1, :])
+        v_init_tensor = torch.empty_like(self.tokenformer_v, dtype=torch.bfloat16)
+        torch.nn.init.normal_(v_init_tensor, std=gain)
+        self.tokenformer_v.data.copy_(v_init_tensor)
+
+        # For the sliced operations, create tensors matching the slice shapes
+        k_slice_init_tensor = torch.empty_like(self.tokenformer_k[0:1, :], dtype=torch.bfloat16)
+        torch.nn.init.normal_(k_slice_init_tensor, std=gain)
+        self.tokenformer_k.data[0:1, :].copy_(k_slice_init_tensor)
+
+        v_slice_init_tensor = torch.empty_like(self.tokenformer_v[0:1, :], dtype=torch.bfloat16)
+        torch.nn.init.zeros_(v_slice_init_tensor)
+        self.tokenformer_v.data[0:1, :].copy_(v_slice_init_tensor)
 
     def forward(self, query, base_layer_results) -> torch.Tensor:
 
