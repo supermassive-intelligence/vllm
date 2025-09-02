@@ -1399,8 +1399,8 @@ class EngineArgs:
         # (e.g. in a Ray actor without GPUs).
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
+                and current_platform.get_device_capability().major < 7):
+            _raise_or_fallback(feature_name="Compute Capability < 7.0",
                                recommend_to_remove=False)
             return False
 
